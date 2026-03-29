@@ -1,11 +1,15 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Godot;
+using HttpClient = System.Net.Http.HttpClient;
 
 namespace GalleryShip;
 
@@ -33,6 +37,10 @@ internal static class GalleryShipCrawler
 		"<a[^>]*href=\"(?<href>/mgallery/board/view/\\?[^\"]+)\"[^>]*>(?<text>.*?)</a>",
 		RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
 
+	private static readonly Regex DateCellRegex = new(
+		"<td[^>]*class=\"[^\"]*gall_date[^\"]*\"[^>]*title=\"(?<title>[^\"]+)\"[^>]*>",
+		RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
+
 	private static readonly Regex WriteDivRegex = new(
 		"<div[^>]*class=\"[^\"]*write_div[^\"]*\"[^>]*>(?<body>.*?)</div>",
 		RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.Compiled);
@@ -49,12 +57,16 @@ internal static class GalleryShipCrawler
 
 	private static readonly object RejectedArticleLock = new();
 
-	private static readonly HashSet<string> RejectedArticleIds = new(StringComparer.Ordinal);
+	private static readonly Dictionary<string, RejectedArticleCacheEntry> RejectedArticleIds = new(StringComparer.Ordinal);
+
+	private static readonly HashSet<string> PermanentRejectedArticleIds = new(StringComparer.Ordinal);
+
+	private static bool _persistentRejectedLoaded;
 
 	public static async Task<IReadOnlyList<GalleryShipListing>> FetchListingsAsync(CancellationToken cancellationToken)
 	{
 		string listHtml = await Client.GetStringAsync(BoardListUrl, cancellationToken);
-		List<(string ArticleId, string Title, string ArticleUrl)> candidates = ParseListPage(listHtml)
+		List<(string ArticleId, string Title, string ArticleUrl, DateTimeOffset? PostedAt)> candidates = ParseListPage(listHtml)
 			.Where(candidate => !ShouldSkipArticleFetch(candidate.ArticleId))
 			.Take(20)
 			.ToList();
@@ -68,16 +80,24 @@ internal static class GalleryShipCrawler
 		return listings;
 	}
 
-	public static void MarkArticleRejected(string articleId)
+	public static void MarkArticleRejected(string articleId, GalleryShipProbeOutcome outcome)
 	{
 		if (string.IsNullOrWhiteSpace(articleId))
 		{
 			return;
 		}
 
-		lock (RejectedArticleLock)
+		if (outcome == GalleryShipProbeOutcome.RunInProgress || outcome == GalleryShipProbeOutcome.Unavailable)
 		{
-			RejectedArticleIds.Add(articleId);
+			lock (RejectedArticleLock)
+			{
+				EnsurePersistentRejectedLoaded();
+				if (PermanentRejectedArticleIds.Add(articleId))
+				{
+					SavePersistentRejectedArticleIds();
+				}
+			}
+			return;
 		}
 	}
 
@@ -90,12 +110,82 @@ internal static class GalleryShipCrawler
 
 		lock (RejectedArticleLock)
 		{
-			return RejectedArticleIds.Contains(articleId);
+			EnsurePersistentRejectedLoaded();
+			if (PermanentRejectedArticleIds.Contains(articleId))
+			{
+				return true;
+			}
+
+			if (!RejectedArticleIds.TryGetValue(articleId, out RejectedArticleCacheEntry entry))
+			{
+				return false;
+			}
+
+			if (DateTime.UtcNow >= entry.ExpiresAtUtc)
+			{
+				RejectedArticleIds.Remove(articleId);
+				return false;
+			}
+
+			return true;
 		}
 	}
 
+	private static void EnsurePersistentRejectedLoaded()
+	{
+		if (_persistentRejectedLoaded)
+		{
+			return;
+		}
+
+		_persistentRejectedLoaded = true;
+		try
+		{
+			string path = GetPersistentRejectedFilePath();
+			if (!File.Exists(path))
+			{
+				return;
+			}
+
+			foreach (string line in File.ReadAllLines(path))
+			{
+				string trimmed = line.Trim();
+				if (!string.IsNullOrWhiteSpace(trimmed))
+				{
+					PermanentRejectedArticleIds.Add(trimmed);
+				}
+			}
+		}
+		catch
+		{
+		}
+	}
+
+	private static void SavePersistentRejectedArticleIds()
+	{
+		try
+		{
+			string path = GetPersistentRejectedFilePath();
+			string? directory = Path.GetDirectoryName(path);
+			if (!string.IsNullOrWhiteSpace(directory))
+			{
+				Directory.CreateDirectory(directory);
+			}
+
+			File.WriteAllLines(path, PermanentRejectedArticleIds.OrderBy(id => id, StringComparer.Ordinal));
+		}
+		catch
+		{
+		}
+	}
+
+	private static string GetPersistentRejectedFilePath()
+	{
+		return ProjectSettings.GlobalizePath("user://galleryship_run_in_progress_articles.txt");
+	}
+
 	private static async Task FetchListingDetailsWithGateAsync(
-		(string ArticleId, string Title, string ArticleUrl) candidate,
+		(string ArticleId, string Title, string ArticleUrl, DateTimeOffset? PostedAt) candidate,
 		int index,
 		GalleryShipListing[] listings,
 		SemaphoreSlim gate,
@@ -113,12 +203,12 @@ internal static class GalleryShipCrawler
 	}
 
 	private static async Task<GalleryShipListing> FetchListingOrFallbackAsync(
-		(string ArticleId, string Title, string ArticleUrl) candidate,
+		(string ArticleId, string Title, string ArticleUrl, DateTimeOffset? PostedAt) candidate,
 		CancellationToken cancellationToken)
 	{
 		try
 		{
-			return await FetchListingDetailsAsync(candidate.ArticleId, candidate.Title, candidate.ArticleUrl, cancellationToken);
+			return await FetchListingDetailsAsync(candidate.ArticleId, candidate.Title, candidate.ArticleUrl, candidate.PostedAt, cancellationToken);
 		}
 		catch (Exception)
 		{
@@ -128,7 +218,8 @@ internal static class GalleryShipCrawler
 				candidate.ArticleUrl,
 				null,
 				BodyFetchFallbackText,
-				null);
+				null,
+				candidate.PostedAt);
 		}
 	}
 
@@ -150,9 +241,9 @@ internal static class GalleryShipCrawler
 		return client;
 	}
 
-	private static List<(string ArticleId, string Title, string ArticleUrl)> ParseListPage(string html)
+	private static List<(string ArticleId, string Title, string ArticleUrl, DateTimeOffset? PostedAt)> ParseListPage(string html)
 	{
-		List<(string ArticleId, string Title, string ArticleUrl)> results = new();
+		List<(string ArticleId, string Title, string ArticleUrl, DateTimeOffset? PostedAt)> results = new();
 
 		foreach (Match rowMatch in RowRegex.Matches(html))
 		{
@@ -180,7 +271,7 @@ internal static class GalleryShipCrawler
 				continue;
 			}
 
-			results.Add((articleId, title, articleUrl));
+			results.Add((articleId, title, articleUrl, ParsePostedAt(rowHtml)));
 		}
 
 		return results;
@@ -190,6 +281,7 @@ internal static class GalleryShipCrawler
 		string articleId,
 		string title,
 		string articleUrl,
+		DateTimeOffset? postedAt,
 		CancellationToken cancellationToken)
 	{
 		string articleHtml = await Client.GetStringAsync(articleUrl, cancellationToken);
@@ -200,7 +292,29 @@ internal static class GalleryShipCrawler
 		string? modSummary = ExtractModSummary(bodyText);
 		string? summary = ExtractSummary(bodyText, steamUrl);
 
-		return new GalleryShipListing(articleId, title, articleUrl, steamUrl, summary, modSummary);
+		return new GalleryShipListing(articleId, title, articleUrl, steamUrl, summary, modSummary, postedAt);
+	}
+
+	private static DateTimeOffset? ParsePostedAt(string rowHtml)
+	{
+		Match dateMatch = DateCellRegex.Match(rowHtml);
+		if (!dateMatch.Success)
+		{
+			return null;
+		}
+
+		string raw = WebUtility.HtmlDecode(dateMatch.Groups["title"].Value).Trim();
+		if (DateTimeOffset.TryParseExact(
+			raw,
+			"yyyy-MM-dd HH:mm:ss",
+			CultureInfo.InvariantCulture,
+			DateTimeStyles.AssumeLocal,
+			out DateTimeOffset postedAt))
+		{
+			return postedAt;
+		}
+
+		return null;
 	}
 
 	private static string? ExtractModSummary(string bodyText)
@@ -267,4 +381,8 @@ internal static class GalleryShipCrawler
 
 		return text[..(maxLength - 3)].TrimEnd() + "...";
 	}
+
+	private readonly record struct RejectedArticleCacheEntry(
+		GalleryShipProbeOutcome Outcome,
+		DateTime ExpiresAtUtc);
 }

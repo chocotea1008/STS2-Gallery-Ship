@@ -6,6 +6,7 @@ using Godot;
 using MegaCrit.Sts2.Core.Assets;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Helpers;
+using MegaCrit.Sts2.Core.Localization.Fonts;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Connection;
@@ -21,6 +22,12 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 {
 	private const int MaxProbeConcurrency = 4;
 
+	private const int RecentUnavailableRetryCount = 2;
+
+	private static readonly TimeSpan RecentUnavailableRetryWindow = TimeSpan.FromMinutes(5);
+
+	private static readonly TimeSpan UnavailableRetryDelay = TimeSpan.FromMilliseconds(450);
+
 	private const string BackButtonScenePath = "res://scenes/ui/back_button.tscn";
 
 	private static readonly string PopupScenePath = SceneHelper.GetScenePath("ui/vertical_popup");
@@ -33,25 +40,35 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 
 	private const string LoadingText = "\uC0C8\uB85C \uACE0\uCE68\uC911...";
 
+	private const string ConnectingText = "\uC811\uC18D \uC911...";
+
 	private const string NoJoinableText = "\uCC38\uC5EC \uAC00\uB2A5 \uBC29\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.";
 
 	private const string RetryHintText = "\uC0C8\uB85C\uACE0\uCE68\uC744 \uB2E4\uC2DC \uB20C\uB7EC \uC8FC\uC138\uC694.";
-
-	private const string ArticleFallbackText = "\uCC38\uC5EC \uB9C1\uD06C\uAC00 \uC5C6\uC5B4 \uC6D0\uBB38 \uAE00\uC744 \uC5FD\uB2C8\uB2E4.";
 
 	private static readonly Vector2 PopupSize = new(1120f, 820f);
 
 	private const float ListingButtonWidth = 620f;
 
-	private const float CompactListingButtonHeight = 84f;
+	private const float ListingButtonHeight = 92f;
 
-	private const float CompactListingRowHeight = 92f;
-
-	private const float DetailedListingButtonHeight = 112f;
-
-	private const float DetailedListingRowHeight = 120f;
+	private const float ListingRowHeight = 100f;
 
 	private const float ListingButtonTop = 4f;
+
+	private const float ListingTitleTop = -12f;
+
+	private const float ListingTitleHeight = 18f;
+
+	private const float ListingPlayerRowBottom = 4f;
+
+	private const float ListingPlayerIconSize = 24f;
+
+	private const int MaxLobbySlots = 3;
+
+	private const int ListingTitleMaxChars = 34;
+
+	private const int PlayerNameMaxChars = 12;
 
 	private Control? _popup;
 
@@ -81,20 +98,30 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 
 	private bool _scrollResizeConnected;
 
+	private bool _forceRefreshOnOpen;
+
 	protected override Control? InitialFocusedControl => _firstFocusableEntry ?? _refreshButton;
 
 	private readonly record struct ProbeCandidate(GalleryShipListing Listing, ulong LobbyId);
 
 	public async Task JoinGameAsync(IClientConnectionInitializer connInitializer)
 	{
-		NJoinFriendScreen joinFriendScreen = _stack.GetSubmenuType<NJoinFriendScreen>();
-		joinFriendScreen.SetStack(_stack);
-		if (!joinFriendScreen.IsNodeReady())
+		ShowConnectingState();
+		try
 		{
-			await ToSignal(joinFriendScreen, Node.SignalName.Ready);
-		}
+			NJoinFriendScreen joinFriendScreen = _stack.GetSubmenuType<NJoinFriendScreen>();
+			joinFriendScreen.SetStack(_stack);
+			if (!joinFriendScreen.IsNodeReady())
+			{
+				await ToSignal(joinFriendScreen, Node.SignalName.Ready);
+			}
 
-		await joinFriendScreen.JoinGameAsync(connInitializer);
+			await joinFriendScreen.JoinGameAsync(connInitializer);
+		}
+		finally
+		{
+			_forceRefreshOnOpen = true;
+		}
 	}
 
 	public override void _Ready()
@@ -107,7 +134,7 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 	public override void OnSubmenuOpened()
 	{
 		base.OnSubmenuOpened();
-		if (_refreshTask == null || _refreshTask.IsCompleted)
+		if (_forceRefreshOnOpen || IsShowingConnectingState() || _refreshTask == null || _refreshTask.IsCompleted)
 		{
 			RefreshListings();
 		}
@@ -265,18 +292,33 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 
 	private void RefreshListings()
 	{
-		if (_refreshTask != null && !_refreshTask.IsCompleted)
+		if (_refreshTask != null && !_refreshTask.IsCompleted && !_forceRefreshOnOpen)
 		{
 			return;
 		}
 
 		_refreshCts?.Cancel();
 		_refreshCts = new CancellationTokenSource();
+		_forceRefreshOnOpen = false;
 		_pendingSourceCount = 0;
 		_firstFocusableEntry = null;
 		SetBodyText(LoadingText);
 		ClearList();
 		_refreshTask = TaskHelper.RunSafely(RefreshListingsAsync(_refreshCts.Token));
+	}
+
+	private void ShowConnectingState()
+	{
+		_refreshCts?.Cancel();
+		_forceRefreshOnOpen = true;
+		_firstFocusableEntry = null;
+		SetBodyText(ConnectingText);
+		ClearList();
+	}
+
+	private bool IsShowingConnectingState()
+	{
+		return _bodyLabel != null && _bodyLabel.Text.Contains(ConnectingText, StringComparison.Ordinal);
 	}
 
 	private async Task RefreshListingsAsync(CancellationToken cancellationToken)
@@ -393,19 +435,60 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 		await gate.WaitAsync(cancellationToken);
 		try
 		{
-			GalleryShipProbeOutcome outcome = await GalleryShipLobbyProbe.ProbeAsync(candidate.LobbyId, cancellationToken);
-			if (outcome == GalleryShipProbeOutcome.Joinable)
+			GalleryShipProbeResult probeResult = await ProbeWithUnavailableRetriesAsync(candidate.Listing, candidate.LobbyId, cancellationToken);
+			if (probeResult.Outcome == GalleryShipProbeOutcome.Joinable)
 			{
-				accepted[slot] = candidate.Listing;
+				accepted[slot] = candidate.Listing with
+				{
+					LobbyPlayers = probeResult.Players
+				};
 				return;
 			}
 
-			GalleryShipCrawler.MarkArticleRejected(candidate.Listing.ArticleId);
+			GalleryShipCrawler.MarkArticleRejected(candidate.Listing.ArticleId, probeResult.Outcome);
 		}
 		finally
 		{
 			gate.Release();
 		}
+	}
+
+	private static async Task<GalleryShipProbeResult> ProbeWithUnavailableRetriesAsync(
+		GalleryShipListing listing,
+		ulong lobbyId,
+		CancellationToken cancellationToken)
+	{
+		GalleryShipProbeResult lastResult = GalleryShipProbeResult.FromOutcome(GalleryShipProbeOutcome.Unavailable);
+		bool shouldRetryUnavailable = ShouldRetryUnavailable(listing);
+		int additionalRetryCount = shouldRetryUnavailable ? RecentUnavailableRetryCount : 0;
+		for (int attempt = 0; attempt <= additionalRetryCount; attempt++)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			lastResult = await GalleryShipLobbyProbe.ProbeAsync(lobbyId, cancellationToken);
+			if (lastResult.Outcome != GalleryShipProbeOutcome.Unavailable)
+			{
+				return lastResult;
+			}
+
+			if (attempt == additionalRetryCount)
+			{
+				return lastResult;
+			}
+
+			await Task.Delay(UnavailableRetryDelay, cancellationToken);
+		}
+
+		return lastResult;
+	}
+
+	private static bool ShouldRetryUnavailable(GalleryShipListing listing)
+	{
+		if (listing.PostedAt is not DateTimeOffset postedAt)
+		{
+			return false;
+		}
+
+		return DateTimeOffset.Now - postedAt < RecentUnavailableRetryWindow;
 	}
 
 	private void ClearList()
@@ -461,15 +544,10 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 			playerId = PlatformUtil.GetLocalPlayerId(PlatformUtil.PrimaryPlatform);
 		}
 
-		string? detail = GetListingDetailText(listing);
-		bool isCompact = string.IsNullOrWhiteSpace(detail);
-		float buttonHeight = isCompact ? CompactListingButtonHeight : DetailedListingButtonHeight;
-		float rowHeight = isCompact ? CompactListingRowHeight : DetailedListingRowHeight;
-
 		Control rowHost = new()
 		{
 			Name = "ListingRow",
-			CustomMinimumSize = new Vector2(0f, rowHeight),
+			CustomMinimumSize = new Vector2(0f, ListingRowHeight),
 			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
 			MouseFilter = MouseFilterEnum.Ignore
 		};
@@ -482,8 +560,8 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 		button.OffsetLeft = -ListingButtonWidth * 0.5f;
 		button.OffsetTop = ListingButtonTop;
 		button.OffsetRight = ListingButtonWidth * 0.5f;
-		button.OffsetBottom = ListingButtonTop + buttonHeight;
-		button.CustomMinimumSize = new Vector2(ListingButtonWidth, buttonHeight);
+		button.OffsetBottom = ListingButtonTop + ListingButtonHeight;
+		button.CustomMinimumSize = new Vector2(ListingButtonWidth, ListingButtonHeight);
 		button.SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter;
 		button.FocusMode = FocusModeEnum.All;
 		button.Connect(NClickableControl.SignalName.Released, Callable.From<NButton>(_ => GalleryShipMod.OpenListing(listing)));
@@ -501,21 +579,153 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 
 		text.FitContent = false;
 		text.BbcodeEnabled = true;
-		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.normalFontSize, 20);
-		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.boldFontSize, 20);
-		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.italicsFontSize, 20);
-
-		string? detail = GetListingDetailText(listing);
-		text.Text = string.IsNullOrWhiteSpace(detail)
-			? "[center][b]" + EscapeBbcode(listing.Title) + "[/b][/center]"
-			: "[center][b]" + EscapeBbcode(listing.Title) + "[/b]\n" + EscapeBbcode(detail) + "[/center]";
+		text.ScrollActive = false;
+		text.AnchorLeft = 0f;
+		text.AnchorTop = 0f;
+		text.AnchorRight = 1f;
+		text.AnchorBottom = 0f;
+		text.OffsetLeft = 18f;
+		text.OffsetTop = ListingTitleTop;
+		text.OffsetRight = -18f;
+		text.OffsetBottom = ListingTitleTop + ListingTitleHeight;
+		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.normalFontSize, 12);
+		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.boldFontSize, 12);
+		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.italicsFontSize, 12);
+		text.Text = "[center][b]" + EscapeBbcode(TrimDisplayText(listing.Title, ListingTitleMaxChars)) + "[/b][/center]";
+		ApplyPlayerSlots(button, listing.LobbyPlayers);
 	}
 
-	private static string? GetListingDetailText(GalleryShipListing listing)
+	private static void ApplyPlayerSlots(NJoinFriendButton button, IReadOnlyList<GalleryShipListingPlayer>? players)
 	{
-		return listing.ModSummary
-			?? listing.Summary
-			?? (listing.HasSteamUrl ? null : ArticleFallbackText);
+		HBoxContainer row = EnsurePlayerSlotRow(button);
+		for (int slotIndex = 0; slotIndex < MaxLobbySlots; slotIndex++)
+		{
+			Control? slot = row.GetNodeOrNull<Control>($"Slot{slotIndex}");
+			if (slot == null)
+			{
+				continue;
+			}
+
+			TextureRect? icon = slot.GetNodeOrNull<TextureRect>("Content/Icon");
+			MegaLabel? label = slot.GetNodeOrNull<MegaLabel>("Content/Name");
+			GalleryShipListingPlayer? player = FindPlayerForSlot(players, slotIndex);
+			bool hasPlayer = player != null;
+			if (icon != null)
+			{
+				icon.Texture = player?.IconTexture;
+				icon.Visible = hasPlayer && player!.IconTexture != null;
+			}
+
+			if (label != null)
+			{
+				label.Text = hasPlayer ? TrimDisplayText(player!.Name, PlayerNameMaxChars) : string.Empty;
+				label.Visible = hasPlayer;
+			}
+		}
+	}
+
+	private static GalleryShipListingPlayer? FindPlayerForSlot(IReadOnlyList<GalleryShipListingPlayer>? players, int slotIndex)
+	{
+		if (players == null)
+		{
+			return null;
+		}
+
+		foreach (GalleryShipListingPlayer player in players)
+		{
+			if (player.SlotId == slotIndex)
+			{
+				return player;
+			}
+		}
+
+		return null;
+	}
+
+	private static HBoxContainer EnsurePlayerSlotRow(Control button)
+	{
+		HBoxContainer? existing = button.GetNodeOrNull<HBoxContainer>("GalleryShipPlayerRow");
+		if (existing != null)
+		{
+			return existing;
+		}
+
+		HBoxContainer row = new()
+		{
+			Name = "GalleryShipPlayerRow",
+			AnchorLeft = 0f,
+			AnchorTop = 1f,
+			AnchorRight = 1f,
+			AnchorBottom = 1f,
+			OffsetLeft = 16f,
+			OffsetTop = -(ListingPlayerIconSize + ListingPlayerRowBottom + 2f),
+			OffsetRight = -16f,
+			OffsetBottom = -ListingPlayerRowBottom,
+			MouseFilter = MouseFilterEnum.Ignore,
+			Alignment = BoxContainer.AlignmentMode.Center
+		};
+		row.AddThemeConstantOverride("separation", 0);
+		button.AddChild(row);
+
+		for (int slotIndex = 0; slotIndex < MaxLobbySlots; slotIndex++)
+		{
+			CenterContainer slot = new()
+			{
+				Name = $"Slot{slotIndex}",
+				SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+				MouseFilter = MouseFilterEnum.Ignore
+			};
+
+			HBoxContainer content = new()
+			{
+				Name = "Content",
+				Alignment = BoxContainer.AlignmentMode.Center,
+				MouseFilter = MouseFilterEnum.Ignore
+			};
+			content.AddThemeConstantOverride("separation", 6);
+			slot.AddChild(content);
+
+			TextureRect icon = new()
+			{
+				Name = "Icon",
+				CustomMinimumSize = new Vector2(ListingPlayerIconSize, ListingPlayerIconSize),
+				ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+				StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+				Visible = false,
+				MouseFilter = MouseFilterEnum.Ignore
+			};
+			content.AddChild(icon);
+
+			MegaLabel label = new()
+			{
+				Name = "Name",
+				VerticalAlignment = VerticalAlignment.Center,
+				HorizontalAlignment = HorizontalAlignment.Left,
+				Visible = false,
+				MouseFilter = MouseFilterEnum.Ignore,
+				AutoSizeEnabled = false
+			};
+			label.AddThemeFontSizeOverride(ThemeConstants.Label.fontSize, 18);
+			label.AddThemeColorOverride("font_color", Colors.White);
+			label.AddThemeColorOverride("font_outline_color", new Color(0.09f, 0.08f, 0.06f, 1f));
+			label.AddThemeConstantOverride(ThemeConstants.Label.outlineSize, 6);
+			label.ApplyLocaleFontSubstitution(FontType.Regular, ThemeConstants.Label.font);
+			content.AddChild(label);
+
+			row.AddChild(slot);
+		}
+
+		return row;
+	}
+
+	private static string TrimDisplayText(string text, int maxChars)
+	{
+		if (string.IsNullOrWhiteSpace(text) || text.Length <= maxChars)
+		{
+			return text;
+		}
+
+		return text.Substring(0, maxChars) + "...";
 	}
 
 	private static string EscapeBbcode(string value)

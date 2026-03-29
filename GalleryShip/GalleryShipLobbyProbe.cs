@@ -1,12 +1,18 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Godot;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Connection;
 using MegaCrit.Sts2.Core.Multiplayer.Messages.Lobby;
+using MegaCrit.Sts2.Core.Platform;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves;
+using MegaCrit.Sts2.Core.Unlocks;
 
 namespace GalleryShip;
 
@@ -20,30 +26,39 @@ internal enum GalleryShipProbeOutcome
 
 internal static class GalleryShipLobbyProbe
 {
-	private static readonly Logger Logger = new("GalleryShipProbe", LogType.Network);
+	private static readonly MegaCrit.Sts2.Core.Logging.Logger Logger = new("GalleryShipProbe", LogType.Network);
 
 	private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(4);
 
-	public static async Task<GalleryShipProbeOutcome> ProbeAsync(ulong lobbyId, CancellationToken cancellationToken)
+	public static async Task<GalleryShipProbeResult> ProbeAsync(ulong lobbyId, CancellationToken cancellationToken)
 	{
 		using CancellationTokenSource probeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 		probeCts.CancelAfter(ProbeTimeout);
 
 		NetClientGameService gameService = new();
-		TaskCompletionSource<ProbeSignal> signalCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		TaskCompletionSource<InitialGameInfoMessage> initialCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+		TaskCompletionSource<ClientLobbyJoinResponseMessage> joinCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
 		void HandleInitialGameInfo(InitialGameInfoMessage message, ulong _)
 		{
-			signalCompletion.TrySetResult(new ProbeSignal(message, null));
+			initialCompletion.TrySetResult(message);
+		}
+
+		void HandleJoinResponse(ClientLobbyJoinResponseMessage message, ulong _)
+		{
+			joinCompletion.TrySetResult(message);
 		}
 
 		void HandleDisconnected(NetErrorInfo info)
 		{
-			signalCompletion.TrySetResult(new ProbeSignal(null, info));
+			ProbeDisconnectedException exception = new(info);
+			initialCompletion.TrySetException(exception);
+			joinCompletion.TrySetException(exception);
 		}
 
 		Task updateLoop = UpdateLoopAsync(gameService, probeCts.Token);
 		gameService.RegisterMessageHandler<InitialGameInfoMessage>(HandleInitialGameInfo);
+		gameService.RegisterMessageHandler<ClientLobbyJoinResponseMessage>(HandleJoinResponse);
 		gameService.Disconnected += HandleDisconnected;
 
 		try
@@ -53,30 +68,38 @@ internal static class GalleryShipLobbyProbe
 			{
 				GalleryShipProbeOutcome outcome = MapNetError(connectError.Value);
 				Logger.Info($"[GalleryShip] probe lobby {lobbyId} rejected during JoinLobby: {outcome}");
-				return outcome;
+				return GalleryShipProbeResult.FromOutcome(outcome);
 			}
 
-			ProbeSignal signal = await signalCompletion.Task.WaitAsync(probeCts.Token);
-			if (signal.DisconnectInfo.HasValue)
+			InitialGameInfoMessage initialMessage = await initialCompletion.Task.WaitAsync(probeCts.Token);
+			GalleryShipProbeOutcome initialOutcome = MapInitialMessage(initialMessage);
+			if (initialOutcome != GalleryShipProbeOutcome.Joinable)
 			{
-				GalleryShipProbeOutcome outcome = MapNetError(signal.DisconnectInfo.Value);
-				Logger.Info($"[GalleryShip] probe lobby {lobbyId} disconnected before confirmation: {outcome}");
-				return outcome;
+				Logger.Info($"[GalleryShip] probe lobby {lobbyId} initial state: {initialOutcome}");
+				return GalleryShipProbeResult.FromOutcome(initialOutcome);
 			}
 
-			GalleryShipProbeOutcome messageOutcome = MapInitialMessage(signal.InitialMessage!.Value);
-			Logger.Info($"[GalleryShip] probe lobby {lobbyId} initial state: {messageOutcome}");
-			return messageOutcome;
+			gameService.SendMessage(CreateJoinRequest());
+			ClientLobbyJoinResponseMessage joinResponse = await joinCompletion.Task.WaitAsync(probeCts.Token);
+			IReadOnlyList<GalleryShipListingPlayer> players = BuildPlayers(joinResponse);
+			Logger.Info($"[GalleryShip] probe lobby {lobbyId} joinable with {players.Count} player slots populated.");
+			return new GalleryShipProbeResult(GalleryShipProbeOutcome.Joinable, players);
+		}
+		catch (ProbeDisconnectedException ex)
+		{
+			GalleryShipProbeOutcome outcome = MapNetError(ex.Info);
+			Logger.Info($"[GalleryShip] probe lobby {lobbyId} disconnected before confirmation: {outcome}");
+			return GalleryShipProbeResult.FromOutcome(outcome);
 		}
 		catch (OperationCanceledException)
 		{
 			Logger.Warn($"[GalleryShip] probe lobby {lobbyId} timed out.");
-			return GalleryShipProbeOutcome.Unavailable;
+			return GalleryShipProbeResult.FromOutcome(GalleryShipProbeOutcome.Unavailable);
 		}
 		catch (Exception ex)
 		{
 			Logger.Warn($"[GalleryShip] probe lobby {lobbyId} failed unexpectedly: {ex}");
-			return GalleryShipProbeOutcome.Unavailable;
+			return GalleryShipProbeResult.FromOutcome(GalleryShipProbeOutcome.Unavailable);
 		}
 		finally
 		{
@@ -95,7 +118,78 @@ internal static class GalleryShipLobbyProbe
 			}
 
 			gameService.UnregisterMessageHandler<InitialGameInfoMessage>(HandleInitialGameInfo);
+			gameService.UnregisterMessageHandler<ClientLobbyJoinResponseMessage>(HandleJoinResponse);
 			gameService.Disconnected -= HandleDisconnected;
+		}
+	}
+
+	private static ClientLobbyJoinRequestMessage CreateJoinRequest()
+	{
+		SaveManager saveManager = SaveManager.Instance;
+		int maxAscension = saveManager.Progress.MaxMultiplayerAscension;
+		SerializableUnlockState unlockState = saveManager.GenerateUnlockStateFromProgress().ToSerializable();
+		return new ClientLobbyJoinRequestMessage
+		{
+			maxAscensionUnlocked = maxAscension,
+			unlockState = unlockState
+		};
+	}
+
+	private static IReadOnlyList<GalleryShipListingPlayer> BuildPlayers(ClientLobbyJoinResponseMessage joinResponse)
+	{
+		if (joinResponse.playersInLobby == null || joinResponse.playersInLobby.Count == 0)
+		{
+			return Array.Empty<GalleryShipListingPlayer>();
+		}
+
+		ulong localPlayerId = 0;
+		try
+		{
+			localPlayerId = PlatformUtil.GetLocalPlayerId(PlatformUtil.PrimaryPlatform);
+		}
+		catch (Exception ex)
+		{
+			Logger.Warn($"[GalleryShip] failed to resolve local player id: {ex.Message}");
+		}
+
+		List<LobbyPlayer> filteredPlayers = new(joinResponse.playersInLobby.Count);
+		foreach (LobbyPlayer player in joinResponse.playersInLobby)
+		{
+			if (localPlayerId != 0 && player.id == localPlayerId)
+			{
+				continue;
+			}
+
+			filteredPlayers.Add(player);
+		}
+
+		if (filteredPlayers.Count == 0)
+		{
+			return Array.Empty<GalleryShipListingPlayer>();
+		}
+
+		filteredPlayers.Sort((left, right) => left.slotId.CompareTo(right.slotId));
+		List<GalleryShipListingPlayer> players = new(filteredPlayers.Count);
+		for (int index = 0; index < filteredPlayers.Count; index++)
+		{
+			LobbyPlayer player = filteredPlayers[index];
+			string name = GetPlayerName(player.id);
+			Texture2D? iconTexture = player.character?.IconTexture;
+			players.Add(new GalleryShipListingPlayer(index, player.id, name, iconTexture));
+		}
+		return players;
+	}
+
+	private static string GetPlayerName(ulong playerId)
+	{
+		try
+		{
+			return PlatformUtil.GetPlayerName(PlatformUtil.PrimaryPlatform, playerId);
+		}
+		catch (Exception ex)
+		{
+			Logger.Warn($"[GalleryShip] failed to resolve player name for {playerId}: {ex.Message}");
+			return playerId.ToString();
 		}
 	}
 
@@ -146,5 +240,18 @@ internal static class GalleryShipLobbyProbe
 		}
 	}
 
-	private readonly record struct ProbeSignal(InitialGameInfoMessage? InitialMessage, NetErrorInfo? DisconnectInfo);
+	private sealed class ProbeDisconnectedException(NetErrorInfo info) : Exception(info.ToString())
+	{
+		public NetErrorInfo Info { get; } = info;
+	}
+}
+
+internal readonly record struct GalleryShipProbeResult(
+	GalleryShipProbeOutcome Outcome,
+	IReadOnlyList<GalleryShipListingPlayer> Players)
+{
+	public static GalleryShipProbeResult FromOutcome(GalleryShipProbeOutcome outcome)
+	{
+		return new GalleryShipProbeResult(outcome, Array.Empty<GalleryShipListingPlayer>());
+	}
 }

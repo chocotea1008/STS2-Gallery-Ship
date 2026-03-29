@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using Godot;
 
 namespace GalleryShip;
 
@@ -8,7 +10,9 @@ internal sealed record GalleryShipListing(
 	string ArticleUrl,
 	string? SteamUrl,
 	string? Summary,
-	string? ModSummary)
+	string? ModSummary,
+	DateTimeOffset? PostedAt = null,
+	IReadOnlyList<GalleryShipListingPlayer>? LobbyPlayers = null)
 {
 	public bool HasSteamUrl => !string.IsNullOrWhiteSpace(SteamUrl);
 
@@ -29,3 +33,9 @@ internal sealed record GalleryShipListing(
 		return ulong.TryParse(parts[2], out _) && ulong.TryParse(parts[3], out lobbyId);
 	}
 }
+
+internal sealed record GalleryShipListingPlayer(
+	int SlotId,
+	ulong PlayerId,
+	string Name,
+	Texture2D? IconTexture);
