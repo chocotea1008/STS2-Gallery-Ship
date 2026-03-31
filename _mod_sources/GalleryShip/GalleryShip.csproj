@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>galleryship</AssemblyName>
+    <RootNamespace>GalleryShip</RootNamespace>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <Nullable>enable</Nullable>
+    <TargetFramework>netcoreapp9.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <AllowUnsafeBlocks>False</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="sts2">
+      <HintPath>..\..\data_sts2_windows_x86_64\sts2.dll</HintPath>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>..\..\data_sts2_windows_x86_64\0Harmony.dll</HintPath>
+    </Reference>
+    <Reference Include="GodotSharp">
+      <HintPath>..\..\data_sts2_windows_x86_64\GodotSharp.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>
