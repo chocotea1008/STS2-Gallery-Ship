@@ -144,7 +144,7 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 	public override void _Process(double delta)
 	{
 		base._Process(delta);
-		// Î©îÏù∏ Î©îÎâ¥ ?®Ïπò?Ä Î≥ÑÍ∞úÎ°??§ÌÅ¨Î¶??êÏ≤¥?êÏÑú???§ÏãúÍ∞??§Ï†ï??Í∞êÏãú?¥ÏÑú Î∞òÏòÅ
+		// No per-frame updates are currently required here.
 	}
 
 	public override void OnSubmenuClosed()
@@ -230,9 +230,9 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 			_bodyLabel.OffsetTop = 116f;
 			_bodyLabel.OffsetRight = -112f;
 			_bodyLabel.OffsetBottom = 170f;
-			_bodyLabel.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.normalFontSize, 25);
-			_bodyLabel.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.boldFontSize, 25);
-			_bodyLabel.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.italicsFontSize, 25);
+			_bodyLabel.AddThemeFontSizeOverride(GalleryShipThemeCompat.RichTextLabel.NormalFontSize, 25);
+			_bodyLabel.AddThemeFontSizeOverride(GalleryShipThemeCompat.RichTextLabel.BoldFontSize, 25);
+			_bodyLabel.AddThemeFontSizeOverride(GalleryShipThemeCompat.RichTextLabel.ItalicsFontSize, 25);
 		}
 
 		if (_refreshButton != null)
@@ -629,9 +629,9 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 		text.OffsetTop = ListingTitleTop;
 		text.OffsetRight = -18f;
 		text.OffsetBottom = ListingTitleTop + ListingTitleHeight;
-		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.normalFontSize, 12);
-		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.boldFontSize, 12);
-		text.AddThemeFontSizeOverride(ThemeConstants.RichTextLabel.italicsFontSize, 12);
+		text.AddThemeFontSizeOverride(GalleryShipThemeCompat.RichTextLabel.NormalFontSize, 12);
+		text.AddThemeFontSizeOverride(GalleryShipThemeCompat.RichTextLabel.BoldFontSize, 12);
+		text.AddThemeFontSizeOverride(GalleryShipThemeCompat.RichTextLabel.ItalicsFontSize, 12);
 		text.Text = "[center][b]" + EscapeBbcode(TrimDisplayText(listing.Title, ListingTitleMaxChars)) + "[/b][/center]";
 		ApplyPlayerSlots(button, listing.LobbyPlayers);
 	}
@@ -746,11 +746,11 @@ internal sealed partial class GalleryShipScreen : NSubmenu
 				MouseFilter = MouseFilterEnum.Ignore,
 				AutoSizeEnabled = false
 			};
-			label.AddThemeFontSizeOverride(ThemeConstants.Label.fontSize, 18);
+			label.AddThemeFontSizeOverride(GalleryShipThemeCompat.Label.FontSize, 18);
 			label.AddThemeColorOverride("font_color", Colors.White);
 			label.AddThemeColorOverride("font_outline_color", new Color(0.09f, 0.08f, 0.06f, 1f));
-			label.AddThemeConstantOverride(ThemeConstants.Label.outlineSize, 6);
-			label.ApplyLocaleFontSubstitution(FontType.Regular, ThemeConstants.Label.font);
+			label.AddThemeConstantOverride(GalleryShipThemeCompat.Label.OutlineSize, 6);
+			label.ApplyLocaleFontSubstitution(FontType.Regular, GalleryShipThemeCompat.Label.Font);
 			content.AddChild(label);
 
 			row.AddChild(slot);

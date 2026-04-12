@@ -428,7 +428,14 @@ public static class GalleryShipMod
 		string joinUrl = _pendingHostJoinUrl;
 		ClearPendingHostClipboard();
 		DisplayServer.ClipboardSet(joinUrl);
-		ShowHostClipboardToast(context, HostClipboardToastText);
+		try
+		{
+			ShowHostClipboardToast(context, HostClipboardToastText);
+		}
+		catch (Exception ex)
+		{
+			Log.Warn("[GalleryShip] Failed to show host clipboard toast: " + ex.Message);
+		}
 		Log.Info("[GalleryShip] Copied host join URL: " + joinUrl);
 	}
 
@@ -506,9 +513,9 @@ public static class GalleryShipMod
 		};
 		_hostClipboardToastLabel.AddThemeColorOverride("font_color", new Color(1f, 0.95f, 0.85f, 1f));
 		_hostClipboardToastLabel.AddThemeColorOverride("font_outline_color", new Color(0.16f, 0.11f, 0.06f, 1f));
-		_hostClipboardToastLabel.AddThemeConstantOverride(ThemeConstants.Label.outlineSize, 8);
-		_hostClipboardToastLabel.AddThemeFontSizeOverride(ThemeConstants.Label.fontSize, 22);
-		_hostClipboardToastLabel.ApplyLocaleFontSubstitution(FontType.Regular, ThemeConstants.Label.font);
+		_hostClipboardToastLabel.AddThemeConstantOverride(GalleryShipThemeCompat.Label.OutlineSize, 8);
+		_hostClipboardToastLabel.AddThemeFontSizeOverride(GalleryShipThemeCompat.Label.FontSize, 22);
+		_hostClipboardToastLabel.ApplyLocaleFontSubstitution(FontType.Regular, GalleryShipThemeCompat.Label.Font);
 		_hostClipboardToastRoot.AddChild(_hostClipboardToastLabel);
 	}
 
@@ -895,9 +902,9 @@ Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContin
 		};
 		_updateToastLabel.AddThemeColorOverride("font_color", new Color(1f, 0.95f, 0.85f, 1f));
 		_updateToastLabel.AddThemeColorOverride("font_outline_color", new Color(0.16f, 0.11f, 0.06f, 1f));
-		_updateToastLabel.AddThemeConstantOverride(ThemeConstants.Label.outlineSize, 8);
-		_updateToastLabel.AddThemeFontSizeOverride(ThemeConstants.Label.fontSize, 20);
-		_updateToastLabel.ApplyLocaleFontSubstitution(FontType.Regular, ThemeConstants.Label.font);
+		_updateToastLabel.AddThemeConstantOverride(GalleryShipThemeCompat.Label.OutlineSize, 8);
+		_updateToastLabel.AddThemeFontSizeOverride(GalleryShipThemeCompat.Label.FontSize, 20);
+		_updateToastLabel.ApplyLocaleFontSubstitution(FontType.Regular, GalleryShipThemeCompat.Label.Font);
 		_updateToastRoot.AddChild(_updateToastLabel);
 	}
 
