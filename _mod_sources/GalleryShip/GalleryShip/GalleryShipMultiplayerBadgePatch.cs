@@ -21,13 +21,7 @@ internal static class GalleryShipLobbyBadgeUi
 
 	internal static void RefreshPlayerState(NMultiplayerPlayerState playerState)
 	{
-		if (playerState.Player == null)
-		{
-			return;
-		}
-
-		MegaLabel? nameplate = playerState.GetNodeOrNull<MegaLabel>("%NameplateLabel");
-		Refresh(playerState, nameplate, playerState.Player.NetId);
+		Hide(playerState);
 	}
 
 	private static void Refresh(Control owner, MegaLabel? nameplate, ulong playerId)
@@ -66,6 +60,15 @@ internal static class GalleryShipLobbyBadgeUi
 		badge.CustomMinimumSize = badge.Size;
 		badge.Position = ResolveBadgePosition(owner, nameplate, badgeSize);
 		badge.Visible = true;
+	}
+
+	private static void Hide(Control owner)
+	{
+		TextureRect? badge = owner.GetNodeOrNull<TextureRect>(BadgeNodeName);
+		if (badge != null)
+		{
+			badge.Visible = false;
+		}
 	}
 
 	private static TextureRect CreateBadge(Control owner)
