@@ -516,26 +516,28 @@ internal static class GalleryShipCustomReactionRuntime
 				return;
 			}
 
-			IReadOnlyList<Player>? players = RunManager.Instance?.DebugOnlyGetState()?.Players;
-			if (players == null || players.Count <= 1)
+			CSteamID steamLobbyId = new(lobbyId);
+			int memberCount = SteamMatchmaking.GetNumLobbyMembers(steamLobbyId);
+			if (memberCount <= 1)
 			{
 				return;
 			}
 
-			CSteamID steamLobbyId = new(lobbyId);
-			foreach (Player player in players)
+			HashSet<ulong> activeRemoteMembers = new();
+			for (int index = 0; index < memberCount; index++)
 			{
-				ulong playerId = player.NetId;
+				CSteamID lobbyMember = SteamMatchmaking.GetLobbyMemberByIndex(steamLobbyId, index);
+				ulong playerId = lobbyMember.m_SteamID;
 				if (playerId == 0 || playerId == localPlayerId)
 				{
 					continue;
 				}
 
-				string payloadJson = SteamMatchmaking.GetLobbyMemberData(steamLobbyId, new CSteamID(playerId), LobbyReactionDataKey);
+				activeRemoteMembers.Add(playerId);
+				string payloadJson = SteamMatchmaking.GetLobbyMemberData(steamLobbyId, lobbyMember, LobbyReactionDataKey);
 				if (!state.LastPayloadByPlayer.TryGetValue(playerId, out string? previousPayload))
 				{
-					state.LastPayloadByPlayer[playerId] = payloadJson;
-					continue;
+					previousPayload = null;
 				}
 
 				if (string.Equals(previousPayload, payloadJson, StringComparison.Ordinal))
@@ -555,6 +557,12 @@ internal static class GalleryShipCustomReactionRuntime
 				}
 
 				_ = TaskHelper.RunSafely(HandleRemotePayloadAsync(container, payload));
+			}
+
+			ulong[] staleMemberIds = state.LastPayloadByPlayer.Keys.Where(static id => id != 0).Except(activeRemoteMembers).ToArray();
+			foreach (ulong staleMemberId in staleMemberIds)
+			{
+				state.LastPayloadByPlayer.Remove(staleMemberId);
 			}
 		}
 		catch (Exception ex)

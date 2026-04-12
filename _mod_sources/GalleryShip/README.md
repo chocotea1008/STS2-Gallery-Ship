@@ -1,6 +1,6 @@
 ﻿![Gallery Ship 미리보기](docs/galleryship-preview.webp)
 
-[다운로드](https://github.com/chocotea1008/STS2-Gallery-Ship/releases/tag/v1.2.2)
+[다운로드](https://github.com/chocotea1008/STS2-Gallery-Ship/releases/tag/v1.2.3)
 
 # STS2 Gallery Ship
 
