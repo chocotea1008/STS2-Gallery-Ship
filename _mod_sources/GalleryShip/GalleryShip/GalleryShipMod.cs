@@ -16,7 +16,11 @@ using MegaCrit.Sts2.Core.Multiplayer.Connection;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
 using MegaCrit.Sts2.Core.Platform;
+using MegaCrit.Sts2.Core.Platform.Steam;
+using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.addons.mega_text;
+using Steamworks;
+using SystemVersion = System.Version;
 using HttpClient = System.Net.Http.HttpClient;
 
 namespace GalleryShip;
@@ -43,19 +47,26 @@ public static class GalleryShipMod
 	private const string UpdateHttpUserAgent = "GalleryShipAutoUpdater/1.0";
 	private const string PendingUpdateDirectoryName = "_pending_update";
 	private const string PendingUpdateVersionFileName = "prepared_version.txt";
+	private const string PlayerBadgeFileName = "gallery_ship_player_badge.webp";
+	private const string LobbyMemberBadgeKey = "galleryship_mod";
+	private const string LobbyMemberBadgeValue = "1";
 
 	private static readonly FieldInfo? SteamLobbyIdField = AccessTools.Field(typeof(SteamClientConnectionInitializer), "_lobbySteamId");
 	private static readonly JsonSerializerOptions UpdateJsonOptions = new()
 	{
 		PropertyNameCaseInsensitive = true
 	};
-	private static readonly Version CurrentVersion = ParseVersionString(Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion);
+	private static readonly string CurrentInformationalVersionText = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0";
+	private static readonly bool IsBetaBuild = CurrentInformationalVersionText.Contains("-beta", StringComparison.OrdinalIgnoreCase);
+	private static readonly SystemVersion CurrentVersion = ParseVersionString(CurrentInformationalVersionText);
 	private static readonly string CurrentVersionText = CurrentVersion.ToString();
 
 	private static string? _modDirectory;
 	private static Texture2D? _iconTexture;
+	private static Texture2D? _playerBadgeTexture;
 	private static Texture2D? _whiteTexture;
 	private static GalleryShipScreen? _screen;
+	private static ulong? _currentSteamLobbyId;
 	private static ulong? _pendingGalleryShipLobbyId;
 	private static ulong _pendingGalleryShipJoinAtMs;
 	private static string? _pendingHostJoinUrl;
@@ -102,7 +113,10 @@ public static class GalleryShipMod
 			_pendingUpdateToast = false;
 		}
 
-		_updateCheckTask ??= TaskHelper.RunSafely(CheckForUpdatesAsync());
+		if (!IsBetaBuild)
+		{
+			_updateCheckTask ??= TaskHelper.RunSafely(CheckForUpdatesAsync());
+		}
 	}
 
 	internal static Texture2D? GetIconTexture()
@@ -132,6 +146,129 @@ public static class GalleryShipMod
 
 		_iconTexture = ImageTexture.CreateFromImage(image);
 		return _iconTexture;
+	}
+
+	internal static Texture2D? GetPlayerBadgeTexture()
+	{
+		if (_playerBadgeTexture != null)
+		{
+			return _playerBadgeTexture;
+		}
+
+		if (string.IsNullOrWhiteSpace(_modDirectory))
+		{
+			return null;
+		}
+
+		string badgePath = Path.Combine(_modDirectory, PlayerBadgeFileName);
+		if (!File.Exists(badgePath))
+		{
+			Log.Warn("[GalleryShip] Player badge image missing: " + badgePath);
+			return null;
+		}
+
+		try
+		{
+			Image image = Image.LoadFromFile(badgePath);
+			if (!image.HasMipmaps())
+			{
+				image.GenerateMipmaps();
+			}
+
+			_playerBadgeTexture = ImageTexture.CreateFromImage(image);
+			return _playerBadgeTexture;
+		}
+		catch (Exception ex)
+		{
+			Log.Warn("[GalleryShip] Failed to load player badge image: " + ex.Message);
+			return null;
+		}
+	}
+
+	internal static void PublishLocalLobbyBadge(INetGameService gameService)
+	{
+		if (!TryRememberSteamLobby(gameService, out ulong lobbyId))
+		{
+			return;
+		}
+
+		try
+		{
+			SteamMatchmaking.SetLobbyMemberData(new CSteamID(lobbyId), LobbyMemberBadgeKey, LobbyMemberBadgeValue);
+		}
+		catch (Exception ex)
+		{
+			Log.Warn("[GalleryShip] Failed to publish lobby badge: " + ex.Message);
+		}
+	}
+
+	internal static void RememberCurrentLobbyFromRunManager()
+	{
+		try
+		{
+			if (RunManager.Instance?.NetService != null)
+			{
+				TryRememberSteamLobby(RunManager.Instance.NetService, out _);
+			}
+		}
+		catch
+		{
+		}
+	}
+
+	internal static void ClearLobbyBadgeContext(INetGameService gameService)
+	{
+		if (!TryParseSteamLobbyId(gameService, out ulong lobbyId))
+		{
+			_currentSteamLobbyId = null;
+			return;
+		}
+
+		if (_currentSteamLobbyId == null || _currentSteamLobbyId.Value == lobbyId)
+		{
+			_currentSteamLobbyId = null;
+		}
+	}
+
+	internal static bool HasLobbyBadge(ulong playerId)
+	{
+		if (playerId == 0 || _currentSteamLobbyId == null || !SteamInitializer.Initialized)
+		{
+			return false;
+		}
+
+		try
+		{
+			string value = SteamMatchmaking.GetLobbyMemberData(new CSteamID(_currentSteamLobbyId.Value), new CSteamID(playerId), LobbyMemberBadgeKey);
+			return string.Equals(value, LobbyMemberBadgeValue, StringComparison.Ordinal);
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+	private static bool TryRememberSteamLobby(INetGameService gameService, out ulong lobbyId)
+	{
+		if (!TryParseSteamLobbyId(gameService, out lobbyId))
+		{
+			return false;
+		}
+
+		_currentSteamLobbyId = lobbyId;
+		return true;
+	}
+
+	private static bool TryParseSteamLobbyId(INetGameService gameService, out ulong lobbyId)
+	{
+		lobbyId = 0;
+		if (gameService.Platform != PlatformType.Steam || !SteamInitializer.Initialized)
+		{
+			return false;
+		}
+
+		string? rawLobbyIdentifier = gameService.GetRawLobbyIdentifier();
+		return ulong.TryParse(rawLobbyIdentifier, out lobbyId) && lobbyId != 0;
 	}
 
 	internal static Texture2D GetWhiteTexture()
@@ -395,6 +532,12 @@ public static class GalleryShipMod
 
 	private static async Task CheckForUpdatesAsync()
 	{
+		if (IsBetaBuild)
+		{
+			Log.Info($"[GalleryShip] Skipping auto-update check for beta build {CurrentInformationalVersionText}.");
+			return;
+		}
+
 		try
 		{
 			CleanupPreparedUpdateStateIfApplied();
@@ -404,7 +547,7 @@ public static class GalleryShipMod
 				return;
 			}
 
-			Version latestVersion = ParseVersionString(release.TagName);
+			SystemVersion latestVersion = ParseVersionString(release.TagName);
 			if (latestVersion <= CurrentVersion)
 			{
 				return;
@@ -575,7 +718,7 @@ Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContin
 			return;
 		}
 
-		Version preparedVersion = ParseVersionString(preparedVersionText);
+		SystemVersion preparedVersion = ParseVersionString(preparedVersionText);
 		if (preparedVersion <= CurrentVersion)
 		{
 			DeletePreparedUpdateVersionFile();
@@ -648,11 +791,11 @@ Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContin
 		}
 	}
 
-	private static Version ParseVersionString(string? text)
+	private static SystemVersion ParseVersionString(string? text)
 	{
 		if (string.IsNullOrWhiteSpace(text))
 		{
-			return new Version(0, 0, 0);
+			return new SystemVersion(0, 0, 0);
 		}
 
 		string trimmed = text.Trim().TrimStart('v', 'V');
@@ -662,7 +805,7 @@ Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContin
 			trimmed = trimmed[..cutIndex];
 		}
 
-		return Version.TryParse(trimmed, out Version? version) ? version : new Version(0, 0, 0);
+		return SystemVersion.TryParse(trimmed, out SystemVersion? version) ? version : new SystemVersion(0, 0, 0);
 	}
 
 	private static void QueueUpdateToast()

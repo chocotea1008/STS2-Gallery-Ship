@@ -1,5 +1,7 @@
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
+using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
 using MegaCrit.Sts2.Core.Nodes.Screens.CharacterSelect;
 using MegaCrit.Sts2.Core.Nodes.Screens.CustomRun;
 using MegaCrit.Sts2.Core.Nodes.Screens.DailyRun;
@@ -12,7 +14,7 @@ internal static class HostClipboardPatch
 {
 	[HarmonyPatch(typeof(NCharacterSelectScreen), "InitializeMultiplayerAsHost")]
 	[HarmonyPostfix]
-	private static void CharacterSelectHostPostfix(INetGameService gameService, int maxPlayers)
+	private static void CharacterSelectHostPostfix(NCharacterSelectScreen __instance, INetGameService gameService, int maxPlayers)
 	{
 		GalleryShipMod.PreparePendingHostClipboard(gameService);
 	}
@@ -26,7 +28,7 @@ internal static class HostClipboardPatch
 
 	[HarmonyPatch(typeof(NCustomRunScreen), "InitializeMultiplayerAsHost")]
 	[HarmonyPostfix]
-	private static void CustomHostPostfix(INetGameService gameService, int maxPlayers)
+	private static void CustomHostPostfix(NCustomRunScreen __instance, INetGameService gameService, int maxPlayers)
 	{
 		GalleryShipMod.PreparePendingHostClipboard(gameService);
 	}

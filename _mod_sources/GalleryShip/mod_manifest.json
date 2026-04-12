@@ -3,7 +3,7 @@
   "name": "Gallery Ship",
   "author": "chocotea1008",
   "description": "Adds a Gallery Ship multiplayer browser to the Slay the Spire 2 main menu.",
-  "version": "1.1.4",
+  "version": "1.2.0-beta1",
   "has_pck": false,
   "has_dll": true,
   "dependencies": [],

@@ -24,7 +24,18 @@ foreach ($targetDir in @($modsDir, $stagingDir)) {
     New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectDir "mod_manifest.json") -Destination (Join-Path $targetDir "mod_manifest.json") -Force
     Copy-Item -LiteralPath (Join-Path $projectDir "gallery_ship_button.png") -Destination (Join-Path $targetDir "gallery_ship_button.png") -Force
+    Copy-Item -LiteralPath (Join-Path $projectDir "gallery_ship_player_badge.webp") -Destination (Join-Path $targetDir "gallery_ship_player_badge.webp") -Force
     Copy-Item -LiteralPath (Join-Path $buildDir "galleryship.dll") -Destination (Join-Path $targetDir "galleryship.dll") -Force
+    foreach ($staleFile in @("System.Drawing.Common.dll", "Microsoft.Win32.SystemEvents.dll")) {
+        $stalePath = Join-Path $targetDir $staleFile
+        if (Test-Path -LiteralPath $stalePath) {
+            Remove-Item -LiteralPath $stalePath -Force
+        }
+    }
+    $depsPath = Join-Path $targetDir "galleryship.deps.json"
+    if (Test-Path -LiteralPath $depsPath) {
+        Remove-Item -LiteralPath $depsPath -Force
+    }
 }
 
 Write-Host "GalleryShip deployed to $modsDir and $stagingDir"
