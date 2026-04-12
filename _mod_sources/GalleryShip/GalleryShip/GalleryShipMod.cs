@@ -248,6 +248,25 @@ public static class GalleryShipMod
 		}
 	}
 
+	internal static bool TryGetCurrentSteamLobbyId(out ulong lobbyId)
+	{
+		if (_currentSteamLobbyId is ulong rememberedLobbyId && rememberedLobbyId != 0 && SteamInitializer.Initialized)
+		{
+			lobbyId = rememberedLobbyId;
+			return true;
+		}
+
+		RememberCurrentLobbyFromRunManager();
+		if (_currentSteamLobbyId is ulong refreshedLobbyId && refreshedLobbyId != 0 && SteamInitializer.Initialized)
+		{
+			lobbyId = refreshedLobbyId;
+			return true;
+		}
+
+		lobbyId = 0;
+		return false;
+	}
+
 	private static bool TryRememberSteamLobby(INetGameService gameService, out ulong lobbyId)
 	{
 		if (!TryParseSteamLobbyId(gameService, out lobbyId))

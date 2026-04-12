@@ -2,64 +2,54 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Logging;
-using MegaCrit.Sts2.Core.Multiplayer;
-using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Game.PeerInput;
-using MegaCrit.Sts2.Core.Multiplayer.Serialization;
-using MegaCrit.Sts2.Core.Multiplayer.Transport;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Reaction;
+using MegaCrit.Sts2.Core.Platform;
+using MegaCrit.Sts2.Core.Platform.Steam;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Runs;
+using Steamworks;
 
 namespace GalleryShip;
 
-internal struct GalleryShipCustomReactionMessage : INetMessage, IPacketSerializable
-{
-	private static readonly QuantizeParams QuantizeParams = new(-3f, 3f, 16);
-
-	public GalleryShipEmoteProvider provider;
-
-	public Vector2 normalizedPosition;
-
-	public string imageUrl;
-
-	public string fileExtension;
-
-	public bool ShouldBroadcast => true;
-
-	public NetTransferMode Mode => NetTransferMode.Unreliable;
-
-	public LogLevel LogLevel => LogLevel.VeryDebug;
-
-	public void Serialize(PacketWriter writer)
-	{
-		writer.WriteByte((byte)provider);
-		writer.WriteVector2(normalizedPosition, QuantizeParams, QuantizeParams);
-		writer.WriteString(imageUrl ?? string.Empty);
-		writer.WriteString(fileExtension ?? string.Empty);
-	}
-
-	public void Deserialize(PacketReader reader)
-	{
-		provider = (GalleryShipEmoteProvider)reader.ReadByte();
-		normalizedPosition = reader.ReadVector2(QuantizeParams, QuantizeParams);
-		imageUrl = reader.ReadString();
-		fileExtension = reader.ReadString();
-	}
-}
-
 internal static class GalleryShipCustomReactionRuntime
 {
+	private const string LobbyReactionDataKey = "galleryship_custom_reaction";
+	private const double PollIntervalSeconds = 0.12;
 	private const float WheelIconScale = 1.05f;
 	private const float WheelOutwardOffset = 4f;
 	private const float WheelIconMaxSize = 54f;
 	private const float PopupIconSize = 112f;
+
+	private sealed class LobbyReactionPayload
+	{
+		[JsonPropertyName("t")]
+		public ulong Token { get; set; }
+
+		[JsonPropertyName("p")]
+		public GalleryShipEmoteProvider Provider { get; set; }
+
+		[JsonPropertyName("x")]
+		public float X { get; set; }
+
+		[JsonPropertyName("y")]
+		public float Y { get; set; }
+
+		[JsonPropertyName("u")]
+		public string ImageUrl { get; set; } = string.Empty;
+
+		[JsonPropertyName("e")]
+		public string FileExtension { get; set; } = string.Empty;
+	}
 
 	private sealed class WheelState
 	{
@@ -78,15 +68,15 @@ internal static class GalleryShipCustomReactionRuntime
 		public bool CustomModeActive { get; set; }
 	}
 
-	private sealed class Registration
+	private sealed class PollState
 	{
-		public required INetGameService NetService { get; init; }
+		public required Timer Timer { get; init; }
 
-		public required MessageHandlerDelegate<GalleryShipCustomReactionMessage> Handler { get; init; }
+		public Dictionary<ulong, string> LastPayloadByPlayer { get; } = new();
 	}
 
 	private static readonly Dictionary<NReactionWheel, WheelState> WheelStates = new();
-	private static readonly Dictionary<NReactionContainer, Registration> Registrations = new();
+	private static readonly Dictionary<NReactionContainer, PollState> PollStates = new();
 	private static readonly AccessTools.FieldRef<NReactionWheel, NReactionWheelWedge> RightWedgeRef = AccessTools.FieldRefAccess<NReactionWheel, NReactionWheelWedge>("_rightWedge");
 	private static readonly AccessTools.FieldRef<NReactionWheel, NReactionWheelWedge> DownRightWedgeRef = AccessTools.FieldRefAccess<NReactionWheel, NReactionWheelWedge>("_downRightWedge");
 	private static readonly AccessTools.FieldRef<NReactionWheel, NReactionWheelWedge> DownWedgeRef = AccessTools.FieldRefAccess<NReactionWheel, NReactionWheelWedge>("_downWedge");
@@ -102,30 +92,36 @@ internal static class GalleryShipCustomReactionRuntime
 	private static readonly AccessTools.FieldRef<NReactionWheel, Player?> LocalPlayerRef = AccessTools.FieldRefAccess<NReactionWheel, Player?>("_localPlayer");
 	private static readonly MethodInfo? HideWheelMethod = AccessTools.Method(typeof(NReactionWheel), "HideWheel");
 
-	internal static void Attach(NReactionContainer container, INetGameService netService)
+	internal static void Attach(NReactionContainer container)
 	{
 		Detach(container);
-		MessageHandlerDelegate<GalleryShipCustomReactionMessage> handler = async (message, senderId) =>
+		Timer timer = new()
 		{
-			await HandleRemoteMessageAsync(container, message);
+			Name = "GalleryShipCustomReactionPollTimer",
+			WaitTime = PollIntervalSeconds,
+			OneShot = false,
+			Autostart = true
 		};
-
-		netService.RegisterMessageHandler(handler);
-		Registrations[container] = new Registration
+		timer.Connect(Timer.SignalName.Timeout, Callable.From(() => PollRemoteReactions(container)));
+		container.AddChild(timer);
+		PollStates[container] = new PollState
 		{
-			NetService = netService,
-			Handler = handler
+			Timer = timer
 		};
+		ClearPublishedCustomReaction();
 	}
 
 	internal static void Detach(NReactionContainer container)
 	{
-		if (!Registrations.Remove(container, out Registration? registration))
+		if (PollStates.Remove(container, out PollState? state))
 		{
-			return;
+			if (GodotObject.IsInstanceValid(state.Timer))
+			{
+				state.Timer.QueueFree();
+			}
 		}
 
-		registration.NetService.UnregisterMessageHandler(registration.Handler);
+		ClearPublishedCustomReaction();
 	}
 
 	internal static void HandleWheelInput(NReactionWheel wheel, InputEvent inputEvent)
@@ -439,6 +435,7 @@ internal static class GalleryShipCustomReactionRuntime
 	{
 		try
 		{
+			PublishCustomReaction(container, item, mouseScreenPos);
 			string? localPath = await GalleryShipEmoteService.EnsureLocalImageAsync(item);
 			if (!GodotObject.IsInstanceValid(container) || string.IsNullOrWhiteSpace(localPath))
 			{
@@ -458,18 +455,6 @@ internal static class GalleryShipCustomReactionRuntime
 			}
 
 			ShowReaction(container, textureAsset, mouseScreenPos);
-			if (!Registrations.TryGetValue(container, out Registration? registration))
-			{
-				return;
-			}
-
-			registration.NetService.SendMessage(new GalleryShipCustomReactionMessage
-			{
-				provider = item.Provider,
-				normalizedPosition = NetCursorHelper.GetNormalizedPosition(mouseScreenPos, container),
-				imageUrl = item.ImageUrl,
-				fileExtension = item.FileExtension
-			});
 		}
 		catch (Exception ex)
 		{
@@ -477,11 +462,146 @@ internal static class GalleryShipCustomReactionRuntime
 		}
 	}
 
-	private static async Task HandleRemoteMessageAsync(NReactionContainer container, GalleryShipCustomReactionMessage message)
+	private static void PublishCustomReaction(NReactionContainer container, GalleryShipEmoteItem item, Vector2 mouseScreenPos)
+	{
+		if (!TryGetLobbyContext(out ulong lobbyId, out ulong localPlayerId))
+		{
+			return;
+		}
+
+		Vector2 normalizedPosition = NetCursorHelper.GetNormalizedPosition(mouseScreenPos, container);
+		LobbyReactionPayload payload = new()
+		{
+			Token = Time.GetTicksMsec(),
+			Provider = item.Provider,
+			X = normalizedPosition.X,
+			Y = normalizedPosition.Y,
+			ImageUrl = item.ImageUrl,
+			FileExtension = item.FileExtension ?? string.Empty
+		};
+		string payloadJson = JsonSerializer.Serialize(payload);
+		SteamMatchmaking.SetLobbyMemberData(new CSteamID(lobbyId), LobbyReactionDataKey, payloadJson);
+		if (PollStates.TryGetValue(container, out PollState? state))
+		{
+			state.LastPayloadByPlayer[localPlayerId] = payloadJson;
+		}
+	}
+
+	private static void ClearPublishedCustomReaction()
+	{
+		if (!TryGetLobbyContext(out ulong lobbyId, out _))
+		{
+			return;
+		}
+
+		SteamMatchmaking.SetLobbyMemberData(new CSteamID(lobbyId), LobbyReactionDataKey, string.Empty);
+	}
+
+	private static void PollRemoteReactions(NReactionContainer container)
+	{
+		if (!PollStates.TryGetValue(container, out PollState? state))
+		{
+			return;
+		}
+
+		try
+		{
+			if (!GodotObject.IsInstanceValid(container) || !container.InMultiplayer)
+			{
+				return;
+			}
+
+			if (!TryGetLobbyContext(out ulong lobbyId, out ulong localPlayerId))
+			{
+				return;
+			}
+
+			IReadOnlyList<Player>? players = RunManager.Instance?.DebugOnlyGetState()?.Players;
+			if (players == null || players.Count <= 1)
+			{
+				return;
+			}
+
+			CSteamID steamLobbyId = new(lobbyId);
+			foreach (Player player in players)
+			{
+				ulong playerId = player.NetId;
+				if (playerId == 0 || playerId == localPlayerId)
+				{
+					continue;
+				}
+
+				string payloadJson = SteamMatchmaking.GetLobbyMemberData(steamLobbyId, new CSteamID(playerId), LobbyReactionDataKey);
+				if (!state.LastPayloadByPlayer.TryGetValue(playerId, out string? previousPayload))
+				{
+					state.LastPayloadByPlayer[playerId] = payloadJson;
+					continue;
+				}
+
+				if (string.Equals(previousPayload, payloadJson, StringComparison.Ordinal))
+				{
+					continue;
+				}
+
+				state.LastPayloadByPlayer[playerId] = payloadJson;
+				if (string.IsNullOrWhiteSpace(payloadJson))
+				{
+					continue;
+				}
+
+				if (!TryDeserializePayload(payloadJson, out LobbyReactionPayload payload))
+				{
+					continue;
+				}
+
+				_ = TaskHelper.RunSafely(HandleRemotePayloadAsync(container, payload));
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.Warn("[GalleryShip] Failed to poll remote custom reaction: " + ex.Message);
+		}
+	}
+
+	private static bool TryDeserializePayload(string payloadJson, out LobbyReactionPayload payload)
 	{
 		try
 		{
-			string? localPath = await GalleryShipEmoteService.EnsureLocalImageAsync(message.provider, message.imageUrl, message.fileExtension);
+			LobbyReactionPayload? deserialized = JsonSerializer.Deserialize<LobbyReactionPayload>(payloadJson);
+			if (deserialized == null || string.IsNullOrWhiteSpace(deserialized.ImageUrl))
+			{
+				payload = null!;
+				return false;
+			}
+
+			payload = deserialized;
+			return true;
+		}
+		catch
+		{
+			payload = null!;
+			return false;
+		}
+	}
+
+	private static bool TryGetLobbyContext(out ulong lobbyId, out ulong localPlayerId)
+	{
+		lobbyId = 0;
+		localPlayerId = 0;
+		if (!SteamInitializer.Initialized || !GalleryShipMod.TryGetCurrentSteamLobbyId(out lobbyId))
+		{
+			return false;
+		}
+
+		localPlayerId = PlatformUtil.GetLocalPlayerId(PlatformType.Steam);
+		return localPlayerId != 0;
+	}
+
+	private static async Task HandleRemotePayloadAsync(NReactionContainer container, LobbyReactionPayload payload)
+	{
+		try
+		{
+			string? localPath = await GalleryShipEmoteService.EnsureLocalImageAsync(payload.Provider, payload.ImageUrl, payload.FileExtension);
 			if (!GodotObject.IsInstanceValid(container) || string.IsNullOrWhiteSpace(localPath))
 			{
 				return;
@@ -499,7 +619,7 @@ internal static class GalleryShipCustomReactionRuntime
 				return;
 			}
 
-			Vector2 position = NetCursorHelper.GetControlSpacePosition(message.normalizedPosition, container);
+			Vector2 position = NetCursorHelper.GetControlSpacePosition(new Vector2(payload.X, payload.Y), container);
 			ShowReaction(container, textureAsset, position);
 		}
 		catch (Exception ex)
@@ -568,9 +688,9 @@ internal static class GalleryShipCustomReactionPatch
 {
 	[HarmonyPatch(typeof(NReactionContainer), nameof(NReactionContainer.InitializeNetworking))]
 	[HarmonyPostfix]
-	private static void ReactionContainerInitializeNetworkingPostfix(NReactionContainer __instance, INetGameService netService)
+	private static void ReactionContainerInitializeNetworkingPostfix(NReactionContainer __instance)
 	{
-		GalleryShipCustomReactionRuntime.Attach(__instance, netService);
+		GalleryShipCustomReactionRuntime.Attach(__instance);
 	}
 
 	[HarmonyPatch(typeof(NReactionContainer), nameof(NReactionContainer.DeinitializeNetworking))]
